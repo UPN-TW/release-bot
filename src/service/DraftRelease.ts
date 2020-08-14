@@ -18,12 +18,10 @@ export const draftRelease = async (
   const hasReleaseLabel = pull.labels.find(
     (label) => label.name === RELEASE_LABEL_NAME
   )
-  if (
-    !pull.merged ||
-    pull.headBranchName !== PROD_BRANCH_NAME ||
-    !hasReleaseLabel
-  )
-    return
+
+  const isTarget =
+    pull.merged && pull.headBranchName !== PROD_BRANCH_NAME && hasReleaseLabel
+  if (!isTarget) return
 
   github.createRelease({
     releaseName: pull.releaseVersion,

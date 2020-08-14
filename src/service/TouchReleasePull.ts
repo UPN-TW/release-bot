@@ -19,7 +19,8 @@ export const touchReleasePull = async (
     repo: context.payload.repository.name,
   })
 
-  if (!pull.merged || pull.headBranchName !== DEV_BRANCH_NAME) return
+  const isTarget = pull.merged && pull.headBranchName === DEV_BRANCH_NAME
+  if (!isTarget) return
 
   const releasePull = await github.fetchReleasePull(RELEASE_LABEL_NAME)
 
