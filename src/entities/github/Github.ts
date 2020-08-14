@@ -11,8 +11,8 @@ export class GitHub {
 
   async fetchReleasePull(releaseLabel: string) {
     const pulls = await this.fetchAllPulls()
-    return pulls.data.filter(pull => {
-      return pull.labels.find(label => label.name === releaseLabel)
+    return pulls.data.filter((pull) => {
+      return pull.labels.find((label) => label.name === releaseLabel)
     })[0]
   }
 
@@ -20,14 +20,20 @@ export class GitHub {
     return await this.github.repos.getLatestRelease(this.account)
   }
 
-  async createPull(param: Octokit.RequestOptions & Omit<Octokit.PullsCreateParams, keyof Account>) {
+  async createPull(
+    param: Octokit.RequestOptions &
+      Omit<Octokit.PullsCreateParams, keyof Account>
+  ) {
     return await this.github.pulls.create({
       ...this.account,
       ...param,
     })
   }
 
-  async updatePull(param: Octokit.RequestOptions & Omit<Octokit.PullsUpdateParams, keyof Account>) {
+  async updatePull(
+    param: Octokit.RequestOptions &
+      Omit<Octokit.PullsUpdateParams, keyof Account>
+  ) {
     return await this.github.pulls.update({
       ...this.account,
       ...param,
@@ -53,7 +59,7 @@ export class GitHub {
   }
 }
 
-interface createReleasePayload{
+interface createReleasePayload {
   releaseName: string
   tag: string
   body: string

@@ -10,7 +10,9 @@ const DEV_BRANCH_NAME = process.env.DEV_BRANCH_NAME!
 const PROD_BRANCH_NAME = process.env.PROD_BRANCH_NAME!
 const RELEASE_LABEL_NAME = process.env.RELEASE_LABEL_NAME!
 
-export const touchReleasePull = async (context: Context<Webhooks.WebhookPayloadPullRequest>) => {
+export const touchReleasePull = async (
+  context: Context<Webhooks.WebhookPayloadPullRequest>
+) => {
   const pull = new FeaturePull(context)
   const github = new GitHub(context.github, {
     owner: context.payload.repository.owner.login,
@@ -30,26 +32,30 @@ export const touchReleasePull = async (context: Context<Webhooks.WebhookPayloadP
 }
 
 const createReleasePull = async (pull: FeaturePull, github: GitHub) => {
-	// calc next release version
+  // calc next release version
   const release = await fetchLatestRelease(github)
-	const newVersion = advanceVersion(release)
-	const draftReleasePull = new DraftReleasePull(newVersion)
+  const newVersion = advanceVersion(release)
+  const draftReleasePull = new DraftReleasePull(newVersion)
 
-	// create pull
+  // create pull
   const response = await github.createPull({
     title: draftReleasePull.title,
     body: draftReleasePull.generateBody([pull]),
     base: PROD_BRANCH_NAME,
     head: DEV_BRANCH_NAME,
-	})
+  })
 
-	// add release label to pull
-	const releasePull = new ReleasePull(response.data)
+  // add release label to pull
+  const releasePull = new ReleasePull(response.data)
   await github.addLabelToIssue(releasePull.number, [RELEASE_LABEL_NAME])
 }
 
-const updateReleasePull = async (releasePull: ReleasePull, featurePull: FeaturePull, github: GitHub) => {
-	const newBody = releasePull.body + '\n' + featurePull.record
+const updateReleasePull = async (
+  releasePull: ReleasePull,
+  featurePull: FeaturePull,
+  github: GitHub
+) => {
+  const newBody = releasePull.body + '\n' + featurePull.record
 
   // update feature logs of release pull
   github.updatePull({

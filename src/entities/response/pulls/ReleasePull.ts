@@ -11,4 +11,3 @@ export class ReleasePull {
     return this.item.body
   }
 }
-

@@ -5,7 +5,7 @@ export class FeaturePull {
   constructor(private context: Context<Webhooks.WebhookPayloadPullRequest>) {}
 
   get merged() {
-		return this.context.payload.pull_request.merged
+    return this.context.payload.pull_request.merged
   }
 
   get headBranchName() {
@@ -24,12 +24,11 @@ export class FeaturePull {
     return this.context.payload.pull_request.body
   }
 
-	get record() {
-		return `#${this.number} ${this.title} | by ${this.authorName}`
+  get record() {
+    return `#${this.number} ${this.title} | by ${this.authorName}`
   }
 
   get authorName() {
     return this.context.payload.pull_request.head.user.login
   }
 }
-
