@@ -20,7 +20,7 @@ export const draftRelease = async (
   )
 
   const isTarget =
-    pull.merged && pull.headBranchName !== PROD_BRANCH_NAME && hasReleaseLabel
+    pull.merged && pull.headBranchName === PROD_BRANCH_NAME && hasReleaseLabel
   if (!isTarget) return
 
   github.createRelease({
