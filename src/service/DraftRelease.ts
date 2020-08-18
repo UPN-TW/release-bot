@@ -27,5 +27,6 @@ export const draftRelease = async (
     releaseName: pull.releaseVersion,
     tag: pull.releaseVersion,
     body: pull.body,
+    targetCommitish: PROD_BRANCH_NAME,
   })
 }

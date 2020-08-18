@@ -54,6 +54,7 @@ export class GitHub {
       tag_name: param.tag,
       name: param.releaseName,
       body: param.body,
+      target_commitish: param.targetCommitish,
       draft: true,
     })
   }
@@ -63,4 +64,5 @@ interface createReleasePayload {
   releaseName: string
   tag: string
   body: string
+  targetCommitish: string
 }
