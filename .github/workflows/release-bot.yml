@@ -105,15 +105,39 @@ jobs:
               return `${m[1]}${m[2]}.${m[3]}.${Number(m[4]) + 1}`;
             };
 
-            const latestReleaseVersion = async () => {
+            const parseVersion = (version) => {
+              const m = /^(v?)(\d+)\.(\d+)\.(\d+)$/.exec((version || '').trim());
+              return m ? { prefix: m[1], parts: [Number(m[2]), Number(m[3]), Number(m[4])] } : null;
+            };
+            const compareParts = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+
+            // 舊 bot 只看最新「已 publish」的 release，draft 尚未 publish 時會開出同版號的 PR。
+            // 這裡取已知的最大版號：最新 release、近 100 筆 release（含 draft）、
+            // 近 30 筆已 merge 的 release PR 標題（涵蓋沒建成 draft 的情況）。
+            const highestKnownVersion = async () => {
+              const candidates = [];
               try {
                 const { data } = await github.rest.repos.getLatestRelease({ owner, repo });
-                return data.name || data.tag_name;
+                candidates.push(data.name, data.tag_name);
               } catch (e) {
                 // 舊 bot 任何錯誤都回 0.0.0；這裡只接受 404（尚無 release），其他錯誤直接失敗
-                if (e.status === 404) return '0.0.0';
-                throw e;
+                if (e.status !== 404) throw e;
               }
+              const { data: releases } = await github.rest.repos.listReleases({ owner, repo, per_page: 100 });
+              releases.forEach((r) => candidates.push(r.name, r.tag_name));
+              const { data: closed } = await github.rest.pulls.list({
+                owner, repo, state: 'closed', base: PROD, sort: 'updated', direction: 'desc', per_page: 30,
+              });
+              closed
+                .filter((p) => p.merged_at && hasLabel(p))
+                .forEach((p) => candidates.push(p.title.split(' ')[1]));
+
+              let best = null;
+              for (const c of candidates) {
+                const v = parseVersion(c);
+                if (v && (!best || compareParts(v.parts, best.parts) > 0)) best = v;
+              }
+              return best ? `${best.prefix}${best.parts.join('.')}` : '0.0.0';
             };
 
             const findReleasePull = async () => {
@@ -148,7 +172,7 @@ jobs:
               const releasePull = await findReleasePull();
               if (releasePull) return appendRecord(releasePull.number);
 
-              const version = bumpPatch(await latestReleaseVersion());
+              const version = bumpPatch(await highestKnownVersion());
               const title = `Release ${version}`;
               plan(`開 ${DEV} → ${PROD} PR「${title}」並加 label ${LABEL}`);
               if (dryRun) return;
