@@ -1,18 +1,12 @@
 name: Release Bot (reusable)
 
-# 取代 olympians VM 上的 probot release-bot。各 repo 用
-# examples/caller-release-bot.yml 呼叫，邏輯只維護這一份。
+# 各 repo 用 examples/caller-release-bot.yml 呼叫，邏輯只維護這一份。說明見 README.md。
 #
 # 1. PR merge 進 dev：找 open 的 release label PR（dev → master），把
-#    「#N title | by user」附加到 body；沒有就以最新 release 版號 +1 patch
+#    「#N title | by user」附加到 body；沒有就以已知最大版號 +1 patch
 #    開「Release X.Y.Z」PR 並貼 label。要升 minor/major 時手動改 PR 標題。
 # 2. 帶 release label 的 PR merge 進 master：以標題第二段為版號建立 draft
 #    release（target master），由人工 publish，tag push 才觸發 deploy-production。
-#
-# mode：
-#   shadow：只讀，產生計畫並在延遲後檢查舊 bot 的結果是否一致
-#   active：實際寫入（所有動作可重入，與舊 bot 重疊時不重複）
-#   off：不執行
 #
 # 呼叫端必須是 pull_request_target（PR 多來自 fork，pull_request 拿不到寫入
 # token 與 secret）。這裡不 checkout、不執行 PR 程式碼，PR 標題/內文只經由
@@ -21,13 +15,13 @@ on:
   workflow_call:
     inputs:
       mode:
-        description: shadow / active / off
+        description: active（預設）/ dry-run（只讀，只在 log 與 summary 列出要做的事）/ off
         type: string
-        default: shadow
+        default: active
       app-id:
-        description: GitHub App ID（mamilove-release-bot）
+        description: GitHub App ID（預設 mamilove-release-bot）
         type: string
-        required: true
+        default: '76919'
       dev-branch:
         type: string
         default: dev
@@ -37,9 +31,6 @@ on:
       release-label:
         type: string
         default: 'bot:release'
-      shadow-verify-delay-seconds:
-        type: number
-        default: 60
     secrets:
       app-private-key:
         description: GitHub App private key
@@ -61,7 +52,6 @@ jobs:
       DEV_BRANCH: ${{ inputs.dev-branch }}
       PROD_BRANCH: ${{ inputs.prod-branch }}
       RELEASE_LABEL: ${{ inputs.release-label }}
-      SHADOW_VERIFY_DELAY_SECONDS: ${{ inputs.shadow-verify-delay-seconds }}
     steps:
       # 沿用 GitHub App 身分：release PR 作者不變，
       # 且 App token 開的 PR 會觸發其他 workflow（GITHUB_TOKEN 不會）。
@@ -111,7 +101,7 @@ jobs:
             };
             const compareParts = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 
-            // 舊 bot 只看最新「已 publish」的 release，draft 尚未 publish 時會開出同版號的 PR。
+            // 只看最新「已 publish」的 release 的話，draft 尚未 publish 時會開出同版號的 PR。
             // 這裡取已知的最大版號：最新 release、近 100 筆 release（含 draft）、
             // 近 30 筆已 merge 的 release PR 標題（涵蓋沒建成 draft 的情況）。
             const highestKnownVersion = async () => {
@@ -120,7 +110,7 @@ jobs:
                 const { data } = await github.rest.repos.getLatestRelease({ owner, repo });
                 candidates.push(data.name, data.tag_name);
               } catch (e) {
-                // 舊 bot 任何錯誤都回 0.0.0；這裡只接受 404（尚無 release），其他錯誤直接失敗
+                // 只有 404（尚無 release）視為 0.0.0；其他錯誤直接失敗，避免開出 Release 0.0.1
                 if (e.status !== 404) throw e;
               }
               const { data: releases } = await github.rest.repos.listReleases({ owner, repo, per_page: 100 });
@@ -190,7 +180,7 @@ jobs:
                   return;
                 }
                 if (e.status === 422 && /already exists/i.test(detail)) {
-                  // 併發的另一個 run（或舊 bot）剛開好；補 label 後附加
+                  // 併發的另一個 run 剛開好；補 label 後附加
                   const { data: existing } = await github.rest.pulls.list({
                     owner, repo, state: 'open', base: PROD, head: `${owner}:${DEV}`,
                   });
@@ -228,46 +218,16 @@ jobs:
               });
             };
 
-            // shadow：等舊 bot 處理完，檢查結果是否符合預期
-            const verifyLegacyBot = async () => {
-              await sleep(Number(process.env.SHADOW_VERIFY_DELAY_SECONDS) * 1000);
-              if (pr.base.ref === DEV) {
-                const releasePull = await findReleasePull();
-                if (releasePull && hasRecord(releasePull.body, pr.number)) {
-                  return `一致：release PR #${releasePull.number} 含 #${pr.number}`;
-                }
-                const { data: cmp } = await github.rest.repos.compareCommits({ owner, repo, base: PROD, head: DEV });
-                if (cmp.ahead_by === 0) return `一致：${DEV} 無新 commit，不需 release PR`;
-                return `不一致：找不到含 #${pr.number} 的 open release PR`;
-              }
-              const version = (pr.title.split(' ')[1] || '').trim();
-              const release = await findRelease(version);
-              return release
-                ? `一致：release ${version} 存在（by ${release.author.login}）`
-                : `不一致：找不到 release ${version}`;
-            };
-
-            let result = 'no-op';
             if (pr.base.ref === DEV) {
               await onMergedIntoDev();
-              result = 'dev';
             } else if (pr.base.ref === PROD && hasLabel(pr)) {
               await onReleasePullMerged();
-              result = 'release';
             } else {
               plan(`base=${pr.base.ref}、label=${hasLabel(pr)}，不處理`);
-            }
-
-            let verdict = '';
-            if (MODE === 'shadow' && result !== 'no-op') {
-              verdict = await verifyLegacyBot();
-              if (verdict.startsWith('不一致')) core.warning(verdict);
-              else core.info(verdict);
             }
 
             await core.summary
               .addHeading(`Release Bot（${MODE}）`, 3)
               .addRaw(`PR #${pr.number} → ${pr.base.ref}`, true)
               .addList(log.length ? log : ['（無動作）'])
-              .addRaw(verdict, true)
               .write();

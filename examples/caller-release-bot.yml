@@ -1,9 +1,6 @@
 name: Release Bot
 
-# 呼叫 UPN-TW/release-bot 的 reusable workflow（邏輯集中維護在那裡）。
-# 需要的設定只有 secret MAMILOVE_RELEASE_BOT_KEY（mamilove-release-bot App 的 private key）。
-# 緊急停用：variable RELEASE_BOT_MODE=off（另有 shadow：只讀，供改版驗證用）。
-# pull_request_target 跑的是 base branch 上的檔案，dev 與 master 都要有此檔。
+# 說明：https://github.com/UPN-TW/release-bot
 on:
   pull_request_target:
     types: [closed]
@@ -14,10 +11,7 @@ permissions:
 
 jobs:
   release-bot:
-    if: github.event.pull_request.merged == true && vars.RELEASE_BOT_MODE != 'off'
+    if: github.event.pull_request.merged == true
     uses: UPN-TW/release-bot/.github/workflows/release-bot.yml@v1
-    with:
-      mode: ${{ vars.RELEASE_BOT_MODE || 'active' }}
-      app-id: '76919' # mamilove-release-bot
     secrets:
       app-private-key: ${{ secrets.MAMILOVE_RELEASE_BOT_KEY }}
