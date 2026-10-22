@@ -1,0 +1,249 @@
+name: Release Bot (reusable)
+
+# 取代 olympians VM 上的 probot release-bot。各 repo 用
+# examples/caller-release-bot.yml 呼叫，邏輯只維護這一份。
+#
+# 1. PR merge 進 dev：找 open 的 release label PR（dev → master），把
+#    「#N title | by user」附加到 body；沒有就以最新 release 版號 +1 patch
+#    開「Release X.Y.Z」PR 並貼 label。要升 minor/major 時手動改 PR 標題。
+# 2. 帶 release label 的 PR merge 進 master：以標題第二段為版號建立 draft
+#    release（target master），由人工 publish，tag push 才觸發 deploy-production。
+#
+# mode：
+#   shadow：只讀，產生計畫並在延遲後檢查舊 bot 的結果是否一致
+#   active：實際寫入（所有動作可重入，與舊 bot 重疊時不重複）
+#   off：不執行
+#
+# 呼叫端必須是 pull_request_target（PR 多來自 fork，pull_request 拿不到寫入
+# token 與 secret）。這裡不 checkout、不執行 PR 程式碼，PR 標題/內文只經由
+# context.payload 讀取，不以 ${{ }} 內插進 script。
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: shadow / active / off
+        type: string
+        default: shadow
+      app-id:
+        description: GitHub App ID（mamilove-release-bot）
+        type: string
+        required: true
+      dev-branch:
+        type: string
+        default: dev
+      prod-branch:
+        type: string
+        default: master
+      release-label:
+        type: string
+        default: 'bot:release'
+      shadow-verify-delay-seconds:
+        type: number
+        default: 60
+    secrets:
+      app-private-key:
+        description: GitHub App private key
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release-bot:
+    if: >-
+      github.event_name == 'pull_request_target'
+      && github.event.pull_request.merged == true
+      && inputs.mode != 'off'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      MODE: ${{ inputs.mode }}
+      DEV_BRANCH: ${{ inputs.dev-branch }}
+      PROD_BRANCH: ${{ inputs.prod-branch }}
+      RELEASE_LABEL: ${{ inputs.release-label }}
+      SHADOW_VERIFY_DELAY_SECONDS: ${{ inputs.shadow-verify-delay-seconds }}
+    steps:
+      # 沿用 GitHub App 身分：release PR 作者不變，
+      # 且 App token 開的 PR 會觸發其他 workflow（GITHUB_TOKEN 不會）。
+      # token 只限呼叫端 repo。
+      - name: Generate release bot token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ inputs.app-id }}
+          private-key: ${{ secrets.app-private-key }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Maintain release PR / draft release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const MODE = process.env.MODE;
+            const dryRun = MODE !== 'active';
+            const DEV = process.env.DEV_BRANCH;
+            const PROD = process.env.PROD_BRANCH;
+            const LABEL = process.env.RELEASE_LABEL;
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+            const log = [];
+            const plan = (msg) => {
+              core.info(`[${MODE}] ${msg}`);
+              log.push(msg);
+            };
+            const hasLabel = (p) => (p.labels || []).some((l) => l.name === LABEL);
+            const author = (p) => (p.head && p.head.user ? p.head.user.login : p.user.login);
+            const record = (p) => `#${p.number} ${p.title} | by ${author(p)}`;
+            const hasRecord = (body, number) =>
+              (body || '').split(/\r?\n/).some((l) => l.startsWith(`#${number} `));
+
+            const bumpPatch = (version) => {
+              const m = /^(v?)(\d+)\.(\d+)\.(\d+)$/.exec((version || '').trim());
+              if (!m) throw new Error(`Invalid version format: ${version}`);
+              return `${m[1]}${m[2]}.${m[3]}.${Number(m[4]) + 1}`;
+            };
+
+            const latestReleaseVersion = async () => {
+              try {
+                const { data } = await github.rest.repos.getLatestRelease({ owner, repo });
+                return data.name || data.tag_name;
+              } catch (e) {
+                // 舊 bot 任何錯誤都回 0.0.0；這裡只接受 404（尚無 release），其他錯誤直接失敗
+                if (e.status === 404) return '0.0.0';
+                throw e;
+              }
+            };
+
+            const findReleasePull = async () => {
+              const pulls = await github.paginate(github.rest.pulls.list, {
+                owner, repo, state: 'open', base: PROD, per_page: 100,
+              });
+              return pulls.find(hasLabel);
+            };
+
+            // 讀最新 body 再附加；寫入後回讀，被併發寫入蓋掉就重試
+            const appendRecord = async (number) => {
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                const { data: current } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+                if (hasRecord(current.body, pr.number)) {
+                  plan(`#${pr.number} 已在 release PR #${number}，略過`);
+                  return;
+                }
+                plan(`附加到 release PR #${number}：${record(pr)}`);
+                if (dryRun) return;
+                await github.rest.pulls.update({
+                  owner, repo, pull_number: number, body: `${current.body || ''}\n${record(pr)}`,
+                });
+                await sleep(2000 + Math.floor(Math.random() * 2000));
+                const { data: after } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+                if (hasRecord(after.body, pr.number)) return;
+                core.warning(`release PR #${number} body 被併發更新蓋掉，重試 ${attempt}/3`);
+              }
+              throw new Error(`無法把 #${pr.number} 寫入 release PR #${number}`);
+            };
+
+            const onMergedIntoDev = async () => {
+              const releasePull = await findReleasePull();
+              if (releasePull) return appendRecord(releasePull.number);
+
+              const version = bumpPatch(await latestReleaseVersion());
+              const title = `Release ${version}`;
+              plan(`開 ${DEV} → ${PROD} PR「${title}」並加 label ${LABEL}`);
+              if (dryRun) return;
+              try {
+                const { data: created } = await github.rest.pulls.create({
+                  owner, repo, title, body: `Created By Release Bot:\n \n${record(pr)}`, base: PROD, head: DEV,
+                });
+                await github.rest.issues.addLabels({ owner, repo, issue_number: created.number, labels: [LABEL] });
+                plan(`已開 release PR #${created.number}`);
+              } catch (e) {
+                const detail = JSON.stringify((e.response && e.response.data) || e.message);
+                if (e.status === 422 && /No commits between/i.test(detail)) {
+                  // dev 已被剛 merge 的 release PR 帶進 master
+                  core.notice(`${DEV} 與 ${PROD} 無差異，不開 release PR`);
+                  return;
+                }
+                if (e.status === 422 && /already exists/i.test(detail)) {
+                  // 併發的另一個 run（或舊 bot）剛開好；補 label 後附加
+                  const { data: existing } = await github.rest.pulls.list({
+                    owner, repo, state: 'open', base: PROD, head: `${owner}:${DEV}`,
+                  });
+                  if (!existing.length) throw e;
+                  if (!hasLabel(existing[0])) {
+                    await github.rest.issues.addLabels({ owner, repo, issue_number: existing[0].number, labels: [LABEL] });
+                  }
+                  return appendRecord(existing[0].number);
+                }
+                throw e;
+              }
+            };
+
+            const findRelease = async (version) => {
+              // listReleases 含 draft；getReleaseByTag 查不到 draft
+              const { data } = await github.rest.repos.listReleases({ owner, repo, per_page: 100 });
+              return data.find((r) => r.tag_name === version || r.name === version);
+            };
+
+            const onReleasePullMerged = async () => {
+              const version = (pr.title.split(' ')[1] || '').trim();
+              if (!/^v?\d+\.\d+\.\d+$/.test(version)) {
+                core.setFailed(`release PR 標題「${pr.title}」不是「Release X.Y.Z」格式，未建立 draft release`);
+                return;
+              }
+              const existing = await findRelease(version);
+              if (existing) {
+                plan(`release ${version} 已存在（draft=${existing.draft}，by ${existing.author.login}），略過`);
+                return;
+              }
+              plan(`建立 draft release ${version}（target ${PROD}）`);
+              if (dryRun) return;
+              await github.rest.repos.createRelease({
+                owner, repo, tag_name: version, name: version, body: pr.body || '', target_commitish: PROD, draft: true,
+              });
+            };
+
+            // shadow：等舊 bot 處理完，檢查結果是否符合預期
+            const verifyLegacyBot = async () => {
+              await sleep(Number(process.env.SHADOW_VERIFY_DELAY_SECONDS) * 1000);
+              if (pr.base.ref === DEV) {
+                const releasePull = await findReleasePull();
+                if (releasePull && hasRecord(releasePull.body, pr.number)) {
+                  return `一致：release PR #${releasePull.number} 含 #${pr.number}`;
+                }
+                const { data: cmp } = await github.rest.repos.compareCommits({ owner, repo, base: PROD, head: DEV });
+                if (cmp.ahead_by === 0) return `一致：${DEV} 無新 commit，不需 release PR`;
+                return `不一致：找不到含 #${pr.number} 的 open release PR`;
+              }
+              const version = (pr.title.split(' ')[1] || '').trim();
+              const release = await findRelease(version);
+              return release
+                ? `一致：release ${version} 存在（by ${release.author.login}）`
+                : `不一致：找不到 release ${version}`;
+            };
+
+            let result = 'no-op';
+            if (pr.base.ref === DEV) {
+              await onMergedIntoDev();
+              result = 'dev';
+            } else if (pr.base.ref === PROD && hasLabel(pr)) {
+              await onReleasePullMerged();
+              result = 'release';
+            } else {
+              plan(`base=${pr.base.ref}、label=${hasLabel(pr)}，不處理`);
+            }
+
+            let verdict = '';
+            if (MODE === 'shadow' && result !== 'no-op') {
+              verdict = await verifyLegacyBot();
+              if (verdict.startsWith('不一致')) core.warning(verdict);
+              else core.info(verdict);
+            }
+
+            await core.summary
+              .addHeading(`Release Bot（${MODE}）`, 3)
+              .addRaw(`PR #${pr.number} → ${pr.base.ref}`, true)
+              .addList(log.length ? log : ['（無動作）'])
+              .addRaw(verdict, true)
+              .write();
